@@ -307,6 +307,60 @@ def compute_policy_loss(old_log_prob, log_prob, advantages, eos_mask, cliprange)
     return pg_loss, pg_clipfrac, ppo_kl
 
 
+def compute_sampled_token_distillation_loss(old_log_prob,
+                                            log_prob,
+                                            teacher_log_prob,
+                                            response_mask,
+                                            cliprange,
+                                            loss_mode='pg_reverse_kl',
+                                            log_prob_min_clamp=None,
+                                            advantage_clip=None):
+    """Compute a sampled-token OPD loss on student-generated actions.
+
+    This lightweight OPD variant is designed for AgentGym-RL's multi-turn
+    trajectories. It distills only the sampled assistant tokens selected by
+    ``response_mask`` and does not require full teacher logits or top-k
+    distributions.
+    """
+    if log_prob_min_clamp is not None:
+        old_log_prob = torch.clamp(old_log_prob, min=log_prob_min_clamp)
+        log_prob = torch.clamp(log_prob, min=log_prob_min_clamp)
+        teacher_log_prob = torch.clamp(teacher_log_prob, min=log_prob_min_clamp)
+
+    with torch.no_grad():
+        reverse_kl_est = verl_F.masked_mean(old_log_prob - teacher_log_prob, response_mask)
+        teacher_advantages = teacher_log_prob - old_log_prob
+        if advantage_clip is not None:
+            teacher_advantages = torch.clamp(teacher_advantages, min=-advantage_clip, max=advantage_clip)
+
+    if loss_mode == 'pg_reverse_kl':
+        distill_loss, distill_clipfrac, distill_kl = compute_policy_loss(old_log_prob=old_log_prob,
+                                                                        log_prob=log_prob,
+                                                                        advantages=teacher_advantages,
+                                                                        eos_mask=response_mask,
+                                                                        cliprange=cliprange)
+        metrics = {
+            'distillation/loss': distill_loss.detach().item(),
+            'distillation/clipfrac': distill_clipfrac.detach().item(),
+            'distillation/student_teacher_reverse_kl': reverse_kl_est.detach().item(),
+            'distillation/teacher_advantage_mean':
+                verl_F.masked_mean(teacher_advantages, response_mask).detach().item(),
+            'distillation/ppo_kl': distill_kl.detach().item(),
+        }
+        return distill_loss, metrics
+
+    if loss_mode == 'mse':
+        per_token_loss = 0.5 * (log_prob - teacher_log_prob).square()
+        distill_loss = verl_F.masked_mean(per_token_loss, response_mask)
+        metrics = {
+            'distillation/loss': distill_loss.detach().item(),
+            'distillation/student_teacher_reverse_kl': reverse_kl_est.detach().item(),
+        }
+        return distill_loss, metrics
+
+    raise NotImplementedError(f'Unsupported sampled-token distillation loss_mode: {loss_mode}')
+
+
 def compute_entropy_loss(logits, eos_mask):
     """Compute Categorical entropy loss
 

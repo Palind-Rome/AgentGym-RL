@@ -66,6 +66,12 @@ def main_task(config):
         Role.Critic: ray.remote(CriticWorker),
         Role.RefPolicy: ray.remote(ActorRolloutRefWorker)
     }
+    use_distillation = config.algorithm.get('distillation', {}).get('enabled', False)
+    teacher_path = None
+    if use_distillation:
+        teacher_path = config.algorithm.distillation.teacher_model.get('path', None)
+    if teacher_path is not None:
+        role_worker_mapping[Role.TeacherPolicy] = ray.remote(ActorRolloutRefWorker)
 
     global_pool_id = 'global_pool'
     resource_pool_spec = {
@@ -76,6 +82,8 @@ def main_task(config):
         Role.Critic: global_pool_id,
         Role.RefPolicy: global_pool_id,
     }
+    if teacher_path is not None:
+        mapping[Role.TeacherPolicy] = global_pool_id
 
     resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 

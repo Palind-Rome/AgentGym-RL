@@ -51,6 +51,7 @@ class Role(Enum):
     RefPolicy = 4
     RewardModel = 5
     ActorRolloutRef = 6
+    TeacherPolicy = 7
 
 
 @dataclass
@@ -402,6 +403,8 @@ class RayPPOTrainer(object):
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = Role.RefPolicy in role_worker_mapping
+        self.use_distillation = config.algorithm.get('distillation', {}).get('enabled', False)
+        self.use_teacher_policy = self.use_distillation and Role.TeacherPolicy in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
 
         # define KL control
@@ -553,6 +556,9 @@ class RayPPOTrainer(object):
         with open_dict(self.config):
             self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
             self.config.critic.optim.total_training_steps = total_training_steps
+        OmegaConf.set_struct(self.config.actor_rollout_ref.actor, True)
+        with open_dict(self.config.actor_rollout_ref.actor):
+            self.config.actor_rollout_ref.actor.distillation = deepcopy(self.config.algorithm.get('distillation', {}))
 
     def init_workers(self):
         """Init resource pool and worker group"""
@@ -584,6 +590,20 @@ class RayPPOTrainer(object):
                                                   role='ref')
             self.resource_pool_to_cls[resource_pool]['ref'] = ref_policy_cls
 
+        # create teacher policy for OPD if a separate teacher model is configured
+        if self.use_teacher_policy:
+            teacher_config = deepcopy(self.config.actor_rollout_ref)
+            teacher_path = self.config.algorithm.distillation.teacher_model.get('path', None)
+            if teacher_path is not None:
+                OmegaConf.set_struct(teacher_config.model, True)
+                with open_dict(teacher_config.model):
+                    teacher_config.model.path = teacher_path
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherPolicy)
+            teacher_policy_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.TeacherPolicy],
+                                                      config=teacher_config,
+                                                      role='ref')
+            self.resource_pool_to_cls[resource_pool]['teacher'] = teacher_policy_cls
+
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`. Instead, directly pass different resource pool to different worker groups.
@@ -605,6 +625,10 @@ class RayPPOTrainer(object):
         if self.use_reference_policy:
             self.ref_policy_wg = all_wg['ref']
             self.ref_policy_wg.init_model()
+
+        if self.use_teacher_policy:
+            self.teacher_policy_wg = all_wg['teacher']
+            self.teacher_policy_wg.init_model()
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg['actor_rollout']
@@ -817,6 +841,18 @@ class RayPPOTrainer(object):
                         with _timer('ref', timing_raw):
                             ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
+
+                    if self.use_distillation:
+                        teacher_log_prob_key = self.config.algorithm.distillation.get('teacher_log_prob_key',
+                                                                                       'teacher_log_probs')
+                        if self.use_teacher_policy:
+                            with _timer('teacher', timing_raw):
+                                teacher_log_prob = self.teacher_policy_wg.compute_ref_log_prob(batch)
+                                batch.batch[teacher_log_prob_key] = teacher_log_prob.batch['ref_log_prob']
+                        elif 'ref_log_prob' in batch.batch.keys():
+                            batch.batch[teacher_log_prob_key] = batch.batch['ref_log_prob']
+                        else:
+                            raise RuntimeError('OPD requires either a separate teacher policy or ref_log_prob.')
 
                     # compute values
                     if self.use_critic:

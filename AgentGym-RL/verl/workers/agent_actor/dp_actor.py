@@ -209,6 +209,11 @@ class DataParallelPPOActor(BasePPOActor):
         select_keys = ['input_ids', 'attention_mask', 'position_ids', 'old_log_probs', 'advantages', 'responses', 'response_mask']
         if self.config.use_kl_loss:
             select_keys.append('ref_log_prob')
+        distillation_config = self.config.get('distillation', {})
+        use_distillation = distillation_config.get('enabled', False)
+        if use_distillation:
+            teacher_log_prob_key = distillation_config.get('teacher_log_prob_key', 'teacher_log_probs')
+            select_keys.append(teacher_log_prob_key)
         batch = data.select(batch_keys=select_keys).batch
 
         # Split to make minibatch iterator for updating the actor
@@ -237,6 +242,9 @@ class DataParallelPPOActor(BasePPOActor):
 
                 clip_ratio = self.config.clip_ratio
                 entropy_coeff = self.config.entropy_coeff
+                distillation_clip_ratio = distillation_config.get('cliprange', None)
+                if distillation_clip_ratio is None:
+                    distillation_clip_ratio = clip_ratio
 
                 # all return: (bsz, response_length)
                 entropy, log_prob = self._forward_micro_batch(micro_batch=data, temperature=temperature)
@@ -251,6 +259,8 @@ class DataParallelPPOActor(BasePPOActor):
 
                 # compute policy loss
                 policy_loss = pg_loss - entropy_loss * entropy_coeff
+                if use_distillation and not distillation_config.get('use_task_policy_loss', True):
+                    policy_loss = torch.zeros_like(policy_loss)
 
                 if self.config.use_kl_loss:
                     ref_log_prob = data['ref_log_prob']
@@ -263,6 +273,21 @@ class DataParallelPPOActor(BasePPOActor):
                     policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
                     metrics['actor/kl_loss'] = kl_loss.detach().item()
                     metrics['actor/kl_coef'] = self.config.kl_loss_coef
+
+                if use_distillation:
+                    teacher_log_probs = data[teacher_log_prob_key]
+                    distill_loss, distill_metrics = core_algos.compute_sampled_token_distillation_loss(
+                        old_log_prob=old_log_prob,
+                        log_prob=log_prob,
+                        teacher_log_prob=teacher_log_probs,
+                        response_mask=response_mask,
+                        cliprange=distillation_clip_ratio,
+                        loss_mode=distillation_config.get('loss_mode', 'pg_reverse_kl'),
+                        log_prob_min_clamp=distillation_config.get('log_prob_min_clamp', None),
+                        advantage_clip=distillation_config.get('advantage_clip', None))
+                    policy_loss = policy_loss + distill_loss * distillation_config.get('loss_coef', 1.0)
+                    append_to_dict(metrics, {'distillation/loss_coef': distillation_config.get('loss_coef', 1.0)})
+                    append_to_dict(metrics, distill_metrics)
 
                 if self.config.use_dynamic_bsz:
                     # relative to the dynamic bsz

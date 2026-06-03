@@ -167,6 +167,20 @@ algorithm:
   gamma: 1.0
   lam: 1.0
   adv_estimator: gae
+  distillation:
+    # Sampled-token on-policy distillation for multi-turn AgentGym-RL trajectories.
+    # Disabled by default; when enabled and teacher_model.path is null, ref_log_prob
+    # is reused as teacher_log_probs.
+    enabled: False
+    teacher_model:
+      path: null
+    teacher_log_prob_key: teacher_log_probs
+    loss_mode: pg_reverse_kl  # choices: pg_reverse_kl, mse
+    loss_coef: 1.0
+    use_task_policy_loss: True
+    cliprange: null  # null falls back to actor_rollout_ref.actor.clip_ratio
+    advantage_clip: null
+    log_prob_min_clamp: null
   kl_penalty: kl  # how to estimate kl divergence
   rounds_ctrl:
     type: fixed  # Strategy for controlling the maximum number of interaction turns
