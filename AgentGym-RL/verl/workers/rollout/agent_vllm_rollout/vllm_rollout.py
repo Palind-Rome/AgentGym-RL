@@ -275,7 +275,7 @@ class vLLMRollout(BaseRollout):
         
         # process ids
         rollout_bar.close()
-        response_ids, response_attention_mask, response_position_ids, response_loss_mask = [], [], [], []
+        response_ids, response_attention_mask, response_position_ids, response_loss_mask, response_action_mask = [], [], [], [], []
         scores, messages = [], []
         
         for rollout_handler in rollout_handler_ls:
@@ -289,6 +289,7 @@ class vLLMRollout(BaseRollout):
             response_attention_mask.append(torch.tensor(rollout_handler.response_attention_mask, dtype=torch.int, device=cur_device))
             response_position_ids.append(torch.tensor(rollout_handler.response_position_ids, dtype=torch.int, device=cur_device))
             response_loss_mask.append(torch.tensor(rollout_handler.response_loss_mask, dtype=torch.int, device=cur_device))
+            response_action_mask.append(torch.tensor(rollout_handler.response_action_mask, dtype=torch.int, device=cur_device))
             scores.append(rollout_handler.score)
             messages.append(rollout_handler.messages)
         
@@ -302,6 +303,9 @@ class vLLMRollout(BaseRollout):
         response_loss_mask = pad_sequence(response_loss_mask, batch_first=True, padding_value=0)
         if response_loss_mask.shape[1] < self.config.response_length:
             response_loss_mask = pad_sequence_to_length(response_loss_mask, self.config.response_length, 0)
+        response_action_mask = pad_sequence(response_action_mask, batch_first=True, padding_value=0)
+        if response_action_mask.shape[1] < self.config.response_length:
+            response_action_mask = pad_sequence_to_length(response_action_mask, self.config.response_length, 0)
         response_length = response_ids.size(1)
         delta_position_ids = torch.arange(1, response_length + 1, device=cur_device)
         delta_position_ids = delta_position_ids.unsqueeze(0).repeat(batch_size, 1)
@@ -356,6 +360,7 @@ class vLLMRollout(BaseRollout):
                 'attention_mask': attention_mask,
                 'position_ids': position_ids,
                 'response_mask': response_mask,
+                'action_mask': response_action_mask,
                 'scores': reward_tensor,
                 'task_rounds': torch.tensor(task_rounds, dtype=torch.float32).to(input_ids.device),
                 'task_scores': reward_tensor

@@ -213,7 +213,12 @@ class DataParallelPPOActor(BasePPOActor):
         use_distillation = distillation_config.get('enabled', False)
         if use_distillation:
             teacher_log_prob_key = distillation_config.get('teacher_log_prob_key', 'teacher_log_probs')
+            distillation_mask_key = distillation_config.get('mask_key', 'action_mask')
+            if distillation_mask_key not in data.batch.keys():
+                distillation_mask_key = 'response_mask'
             select_keys.append(teacher_log_prob_key)
+            if distillation_mask_key not in select_keys:
+                select_keys.append(distillation_mask_key)
         batch = data.select(batch_keys=select_keys).batch
 
         # Split to make minibatch iterator for updating the actor
@@ -276,17 +281,20 @@ class DataParallelPPOActor(BasePPOActor):
 
                 if use_distillation:
                     teacher_log_probs = data[teacher_log_prob_key]
+                    distillation_mask = data[distillation_mask_key]
                     distill_loss, distill_metrics = core_algos.compute_sampled_token_distillation_loss(
                         old_log_prob=old_log_prob,
                         log_prob=log_prob,
                         teacher_log_prob=teacher_log_probs,
-                        response_mask=response_mask,
+                        response_mask=distillation_mask,
                         cliprange=distillation_clip_ratio,
                         loss_mode=distillation_config.get('loss_mode', 'pg_reverse_kl'),
                         log_prob_min_clamp=distillation_config.get('log_prob_min_clamp', None),
                         advantage_clip=distillation_config.get('advantage_clip', None))
                     policy_loss = policy_loss + distill_loss * distillation_config.get('loss_coef', 1.0)
                     append_to_dict(metrics, {'distillation/loss_coef': distillation_config.get('loss_coef', 1.0)})
+                    mask_token_fraction = distillation_mask.float().sum() / response_mask.float().sum().clamp_min(1.0)
+                    append_to_dict(metrics, {'distillation/mask_token_fraction': mask_token_fraction.detach().item()})
                     append_to_dict(metrics, distill_metrics)
 
                 if self.config.use_dynamic_bsz:

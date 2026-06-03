@@ -175,6 +175,9 @@ algorithm:
     teacher_model:
       path: null
     teacher_log_prob_key: teacher_log_probs
+    # Prefer action_mask for AgentGym multi-turn rollouts. It excludes environment
+    # observations and hand-inserted chat-template suffix tokens from OPD.
+    mask_key: action_mask
     loss_mode: pg_reverse_kl  # choices: pg_reverse_kl, mse
     loss_coef: 1.0
     use_task_policy_loss: True
